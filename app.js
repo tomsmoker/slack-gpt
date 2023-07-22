@@ -1,73 +1,104 @@
+// Import dependencies
 import * as dotenv from 'dotenv';
-dotenv.config();
 import bolt from '@slack/bolt';
+import { getLLMResponse } from './lib/getLLMResponse.js';
+
+// Configure dotenv
+dotenv.config();
+
 const { App } = bolt;
 
-import { getLLMResponse } from './lib/getLLMResponse.js';
+/**
+ * Sends a loading message to the user.
+ * @param {Object} client - The Slack client.
+ * @param {string} channel - The Slack channel to send the message to.
+ * @return {Object} - The response from the Slack API.
+ */
+const sendLoadingMessage = async (client, channel) => {
+  const loadingMessageResponse = await client.chat.postMessage({
+    channel,
+    text: 'Thinking...',
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'Processing ...',
+        },
+      },
+    ],
+  });
+  return loadingMessageResponse;
+};
+
+/**
+ * Fetches the last 6 messages in the conversation history.
+ * @param {Object} client - The Slack client.
+ * @param {string} channel - The Slack channel to fetch the messages from.
+ * @param {string} timestamp - The timestamp up to which to fetch messages.
+ * @param {string} userId - The user ID who sent the current message.
+ * @return {Array} - An array of formatted messages.
+ */
+const fetchHistory = async (client, channel, timestamp, userId) => {
+  const historyResult = await client.conversations.history({
+    channel,
+    latest: timestamp,
+    inclusive: false,
+    limit: 6,
+  });
+
+  const formattedHistory = historyResult.messages
+    .map((message) => {
+      const messageType = message.user === userId ? 'USER MESSAGE' : 'SYSTEM RESPONSE';
+      return `${messageType}:${message.text}`;
+    })
+    .reverse();
+
+  return formattedHistory;
+};
+
+/**
+ * Updates the loading message with the response from the LLM.
+ * @param {Object} client - The Slack client.
+ * @param {string} channel - The Slack channel to update the message in.
+ * @param {string} timestamp - The timestamp of the message to update.
+ * @param {string} text - The new text for the message.
+ */
+const updateMessage = async (client, channel, timestamp, text) => {
+  await client.chat.update({
+    channel,
+    ts: timestamp,
+    text,
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text,
+        },
+      },
+    ],
+  });
+};
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   appToken: process.env.SLACK_APP_TOKEN,
-  socketMode: true, // Connect using websockets, no need for ngrok or similar.
+  socketMode: true,
 });
 
 app.event('message', async ({ event, client }) => {
   try {
     // Check if the message is from a direct message channel
     if (event.channel_type === 'im' && event.text) {
-      // Send a loading message
-      const loadingMessageResponse = await client.chat.postMessage({
-        channel: event.channel,
-        text: 'Thinking...',
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: 'Thinking... :thinking_face:',
-            },
-          },
-        ],
-      });
+      const loadingMessageResponse = await sendLoadingMessage(client, event.channel);
 
-      // Fetch the last 6 messages in the conversation history
-      const historyResult = await client.conversations.history({
-        channel: event.channel,
-        latest: event.ts, // Fetch history up to the current message timestamp
-        inclusive: false, // Exclude the current message from the history
-        limit: 6, // Limit the number of messages fetched
-      });
+      const formattedHistory = await fetchHistory(client, event.channel, event.ts, event.user);
 
-      // Create a new array of QUESTION, RESPONSE strings to pass to the LLM
-      const formattedHistory = historyResult.messages
-        .map((message) => {
-          const messageType =
-            message.user === event.user ? 'USER MESSAGE' : 'SYSTEM RESPONSE';
-          return `${messageType}:${message.text}`;
-        })
-        .reverse();
-
-      // Get a response from the LLM
       const response = await getLLMResponse(event.text, formattedHistory);
 
-      // TODO: Investigate streaming a response
-
-      // Update the loading message with the chat function's response
-      await client.chat.update({
-        channel: event.channel,
-        ts: loadingMessageResponse.ts,
-        text: response.text,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: response.text,
-            },
-          },
-        ],
-      });
+      await updateMessage(client, event.channel, loadingMessageResponse.ts, response.text);
     }
   } catch (error) {
     console.error(error);
